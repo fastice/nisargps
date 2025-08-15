@@ -303,6 +303,7 @@ class nisarStation():
     @catchError
     def computeVelocityRegression(self, date1, date2, minPoints=10,
                                   dateFormat='%Y-%m-%d', filters={},
+                                  computeVz=False,
                                   **kwargs):
         '''
          Compute velocity for date range
@@ -333,9 +334,16 @@ class nisarStation():
         vxPS, intercept, rx, px, sigmax = linregress(epoch, x)
         vyPS, intercept, ry, py, sigmay = linregress(epoch, y)
         # Scale from projected to actual coordinates
-        return vxPS/self.projLengthScale, vyPS/self.projLengthScale, \
-            np.mean(x), np.mean(y)
-
+        vxPS = vxPS/self.projLengthScale
+        vyPS = vyPS/self.projLengthScale
+        xMean = np.mean(x)
+        yMean = np.mean(y)
+        if not computeVz:
+            return vxPS, vyPS, xMean, yMean
+        vz, intercept, rx, px, sigmaz = linregress(epoch, z)
+        print(f'vz={vz:.2f},$$r^2$$={rx*rx:.2f}, p={px:.3f}, sigma={sigmaz:.4f}')
+        return vxPS, vyPS, xMean, yMean, vz
+    
     @catchError
     def computeVelocityPtToPt(self, date1, date2, minPoints=10,
                               dateFormat='%Y-%m-%d', averagingPeriod=12,
