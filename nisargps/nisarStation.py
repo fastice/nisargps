@@ -51,7 +51,7 @@ class nisarStation():
 
     @catchError
     def __init__(self, stationName,  epsg=None, useDB=True, DBConnection=None,
-                 DBConfigFile='calvaldb_config.ini', **kwargs):
+                 DBConfigFile='calvaldb_config.ini', cacheDB=True, **kwargs):
         '''
         Class for handling GPS data for a NISAR station
 
@@ -94,6 +94,9 @@ class nisarStation():
         #
         self.epsg = epsg
         self.lltoxy = None
+        self.eceftoll = None
+        self.lltoecef = None
+        self.cacheDB = cacheDB
         #
         if useDB and DBConnection is None:
             self.DB = nisarcryodb.nisarcryodb(configFile=DBConfigFile)
@@ -101,10 +104,20 @@ class nisarStation():
             self.DB = DBConnection
         else:
             self.DB = None
-        # Set station id if using a data base
+        # Set station id if using a database
         self.stationID = None
         if self.DB is not None:
             self.stationID = self.DB.stationNameToID(stationName)
+        print(self.stationID)
+        #
+        # cache db for faster access
+        self.DBData = None
+        if self.DB is not None and self.cacheDB:
+            print('Caching station data')
+            self.DBData = self.DB.getTableListing(schemaName='landice',
+                                                  tableName='gps_data',
+                                                  filters={'station_id': self.stationID})
+ 
         # Cache year lengths for speed
         self._computeYearLengthLookUp(**kwargs)
 
@@ -150,6 +163,14 @@ class nisarStation():
             self.lltoxy = pyproj.Transformer.from_crs("EPSG:4326",
                                                       f"EPSG:{self.epsg}"
                                                       ).transform
+        if self.eceftoll is None:
+            self.eceftoll = pyproj.Transformer.from_crs("EPSG:4978",
+                                                        "EPSG:4326"
+                                                       ).transform
+        if self.lltoecef is None:
+            self.lltoecef = pyproj.Transformer.from_crs("EPSG:4326",
+                                                        "EPSG:4978"
+                                                       ).transform
 
     @catchError
     def _determineEPSG(self, lat, **kwargs):
@@ -255,7 +276,7 @@ class nisarStation():
 
     @catchError
     def computeVelocity(self, date1, date2, method='regression', minPoints=10,
-                        dateFormat='%Y-%m-%d', averagingPeriod=12,
+                        dateFormat='%Y-%m-%d', averagingPeriod=12, tides=True,
                         filters={}, **kwargs):
         '''
          Compute velocity for date range
@@ -286,14 +307,14 @@ class nisarStation():
             return self.computeVelocityRegression(date1, date2,
                                                   minPoints=minPoints,
                                                   dateFormat=dateFormat,
-                                                  filters=filters,
+                                                  filters=filters, tides=tides,
                                                   **kwargs)
         elif method == 'point':
-            return self.computeVelocityPtToPt(date2, date1, date2,
+            return self.computeVelocityPtToPt(date1, date2,
                                               minPoints=minPoints,
                                               dateFormat=dateFormat,
                                               averagingPeriod=averagingPeriod,
-                                              filters=filters,
+                                              filters=filters, tides=tides,
                                               **kwargs)
         else:
             self.printError(
@@ -303,7 +324,7 @@ class nisarStation():
     @catchError
     def computeVelocityRegression(self, date1, date2, minPoints=10,
                                   dateFormat='%Y-%m-%d', filters={},
-                                  computeVz=False,
+                                  computeVz=False, tides=True,
                                   **kwargs):
         '''
          Compute velocity for date range
@@ -321,14 +342,17 @@ class nisarStation():
             default is 10.
         Returns
         -------
-        vx, vy, x, y : velocity (vx,vy) and mean location (x, y) of the
+        vx, vy, vz, x, y : velocity (vx,vy) and mean location (x, y) of the
         measurement.
         '''
         date, x, y, z, epoch = self.subsetXYZ(date1, date2,
-                                              dateFormat=dateFormat,
+                                              dateFormat=dateFormat, tides=tides,
                                               filters=filters, **kwargs)
         if x is np.nan:
-            return np.nan, np.nan, np.nan, np.nan
+            if computeVz:
+                return np.nan, np.nan, np.nan, np.nan, np.nan
+            else:
+                return np.nan, np.nan, np.nan, np.nan
         #
         # Uses slope of linear regression as velocity estimate
         vxPS, intercept, rx, px, sigmax = linregress(epoch, x)
@@ -342,11 +366,12 @@ class nisarStation():
             return vxPS, vyPS, xMean, yMean
         vz, intercept, rx, px, sigmaz = linregress(epoch, z)
         print(f'vz={vz:.2f},$$r^2$$={rx*rx:.2f}, p={px:.3f}, sigma={sigmaz:.4f}')
-        return vxPS, vyPS, xMean, yMean, vz
+        return vxPS, vyPS, vz, xMean, yMean
     
     @catchError
     def computeVelocityPtToPt(self, date1, date2, minPoints=10,
                               dateFormat='%Y-%m-%d', averagingPeriod=12,
+                              computeVz=False, tides=True,
                               filters={},
                               **kwargs):
         '''
@@ -381,33 +406,44 @@ class nisarStation():
         dates1, x1, y1, z1, epoch1 = self.subsetXYZ(date1 - tAvg,
                                                     date1 + tAvg,
                                                     minPoints=minPoints,
-                                                    filters=filters,
+                                                    filters=filters,tides=tides,
                                                     **kwargs)
         dates2, x2, y2, z2, epoch2 = self.subsetXYZ(date2 - tAvg,
                                                     date2 + tAvg,
                                                     minPoints=minPoints,
-                                                    filters=filters,
+                                                    filters=filters, tides=tides,
                                                     **kwargs)
         if x1 is np.nan or x2 is np.nan:
-            return np.nan, np.nan, np.nan, np.nan
+            if computeVz:
+                return np.nan, np.nan, np.nan, np.nan, np.nan
+            else:
+                return np.nan, np.nan, np.nan, np.nan
         #
         # Compute averages centered on date1 and date2
         x1Avg, x2Avg = np.mean(x1), np.mean(x2)
         y1Avg, y2Avg = np.mean(y1), np.mean(y2)
         epoch1Avg, epoch2Avg = np.mean(epoch1), np.mean(epoch2)
+        
         dT = epoch2Avg - epoch1Avg
         #
         vxPS = (x2Avg - x1Avg) / dT
         vyPS = (y2Avg - y1Avg) / dT
-        xPos, yPos = (x1Avg + x2Avg) * 0.5
-        yPos, yPos = (y1Avg + y2Avg) * 0.5
-        # Scale from projected to actual coordinates
-        return vxPS/self.projLengthScale, vyPS/self.projLengthScale, xPos, yPos
+        xPos = (x1Avg + x2Avg) * 0.5
+        yPos = (y1Avg + y2Avg) * 0.5
+       
+        if computeVz:
+            z1Avg, z2Avg = np.mean(z1), np.mean(z2)
+            vz = (z2Avg - z1Avg) / dT
+            return vxPS/self.projLengthScale, vyPS/self.projLengthScale, vz, xPos, yPos
+        else:
+            # Scale from projected to actual coordinates
+            return vxPS/self.projLengthScale, vyPS/self.projLengthScale, xPos, yPos
+ 
 
     @catchError
     def computeVelocityTimeSeries(self, date1, date2, dT, sampleInterval,
                                   method='regression', dateFormat='%Y-%m-%d',
-                                  averagingPeriod=12, minPoints=10,
+                                  averagingPeriod=12, minPoints=10, tides=True,
                                   filters={},
                                   **kwargs):
         '''
@@ -460,7 +496,8 @@ class nisarStation():
                                                 method=method,
                                                 minPoints=minPoints,                
                                                 filters=filters,
-                                                averagingPeriod=averagingPeriod
+                                                averagingPeriod=averagingPeriod,
+                                                tides=tides
                                                 )
             #
             dateSeries.append(currentDate + timedelta(hours=dT/2))
@@ -599,7 +636,7 @@ class nisarStation():
     @catchError
     def _subsetXYZDB(self, date1, date2, dateFormat='%Y-%m-%d %H:%M:%S',
                      minPoints=1, removeOverlap=True, sigmaMultiple=3,
-                     quiet=True, filters={}, **kwargs):
+                     quiet=True, filters={}, tides=True, **kwargs):
         '''
         Return all x, y, z points in interval [date1, date2]
 
@@ -632,9 +669,14 @@ class nisarStation():
         d2 = self._datetimeToDecimalYear(date2, **kwargs)
 
         # Query data base for station data
-        data = self.DB.getStationDateRangeData(self.stationName, d1, d2,
-                                               'landice', 'gps_data',
-                                               filters=filters)
+        if self.DBData is None:
+            data = self.DB.getStationDateRangeData(self.stationName, d1, d2,
+                                                   'landice', 'gps_data',
+                                                   filters=filters)
+        else:
+            data = self.DBData[(self.DBData['decimal_year'] >= d1) & 
+                               (self.DBData['decimal_year'] <= d2)]
+    
         # This removes the overlap that comes with the GPS day files
         if removeOverlap:
             data = self._removeOverlap(data)
@@ -643,29 +685,41 @@ class nisarStation():
             if not quiet:
                 print(f'no data in date range for {self.stationName}')
             return np.nan, np.nan, np.nan, np.nan, np.nan
+        epoch = data['decimal_year'].to_numpy()
         # Make sure all is in place for coordinate conversion
+    
+        lat, lon, z = [data[x].to_numpy() for x in ['lat', 'lon', 'ht_abv_eps']]     
         if self.epsg is None:
-            self._determineEPSG(data['lat'].to_numpy()[0])
-        if self.lltoxy is None:
+            self._determineEPSG(data['lat'].to_numpy()[0]) 
+        #
+        if self.lltoxy is None or self.eceftoll is None or self.lltoecef is None:
             self._initCoordinateConversion()
+        #
+        if tides: 
+            dx, dy, dz = [data[x].to_numpy() * 0.01 for x in ['tides_x', 'tides_y', 'tides_z']] 
+            #print(dx[0], dy[0], dz[0])
+            #print(lat[0], lon[0],z[0])
+            x1, y1, z1 = self.lltoecef(lat, lon, z)
+            lat, lon, z = self.eceftoll(x1 - dx, y1 - dy, z1 - dz)
+            #print(lat[0], lon[0], z[0], dx[0], dy[0], dz[0])
         # Convert to x, y
-        x, y = self.lltoxy(data['lat'].to_numpy(), data['lon'].to_numpy())
+        x, y = self.lltoxy(lat, lon)
         #
         if sigmaMultiple is not None:
-            x, y, data = self.removeOutliers(x, y, data,
+            x, y, z, epoch = self.removeOutliers(x, y, z, epoch,
                                              sigmaMultiple=sigmaMultiple,
                                              **kwargs)
+        #print(data)
         #
         date = [self._DecimalYearToDatetime(d) for d in data['decimal_year']]
         # Lat dependendent length scale for projected meters to real meters
         self.meanLat = np.mean(data['lat'].to_numpy())
         self.projLengthScale = self.proj.get_factors(0, self.meanLat
                                                      ).parallel_scale
-        return date, x, y, data['ht_abv_eps'].to_numpy(), \
-            data['decimal_year'].to_numpy()
+        return date, x, y, z, epoch
 
     @catchError
-    def removeOutliers(self, x, y, data, sigmaMultiple=3, **kwargs):
+    def removeOutliers(self, x, y, z, epoch, sigmaMultiple=3, **kwargs):
         '''
         Remove data where date is not equal to the nominal doy to remove
         overlap
@@ -676,18 +730,17 @@ class nisarStation():
         returns:
             Filtered versions of x, y, and data.
         '''
-        epoch = data['decimal_year'].to_numpy()
         good = np.ones(x.shape, dtype=bool)  # Initially keep all
         # Loop through variables and detect outlier as sigmaMultiple deviation
         # from a line fit.
-        for d in [x, y, data['ht_abv_eps'].to_numpy()]:
+        for d in [x, y, z]:
             fitResult = linregress(epoch, d)
             fit = fitResult[0] * epoch + fitResult[1]
             detrended = d - fit
             sigma = np.std(detrended)
             good = np.logical_and(good,
                                   np.abs(detrended) < sigmaMultiple*sigma)
-        return x[good], y[good], data[good]
+        return x[good], y[good], z[good], epoch[good]
 
     @catchError
     def _removeOverlap(self, data, **kwargs):
