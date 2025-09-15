@@ -697,21 +697,20 @@ class nisarStation():
         #
         if tides: 
             dx, dy, dz = [data[x].to_numpy() * 0.01 for x in ['tides_x', 'tides_y', 'tides_z']] 
-            #print(dx[0], dy[0], dz[0])
-            #print(lat[0], lon[0],z[0])
             x1, y1, z1 = self.lltoecef(lat, lon, z)
             lat, lon, z = self.eceftoll(x1 - dx, y1 - dy, z1 - dz)
             #print(lat[0], lon[0], z[0], dx[0], dy[0], dz[0])
         # Convert to x, y
         x, y = self.lltoxy(lat, lon)
         #
-        if sigmaMultiple is not None:
-            x, y, z, epoch = self.removeOutliers(x, y, z, epoch,
-                                             sigmaMultiple=sigmaMultiple,
-                                             **kwargs)
-        #print(data)
+        date = np.array([self._DecimalYearToDatetime(d) for d in data['decimal_year']])
         #
-        date = [self._DecimalYearToDatetime(d) for d in data['decimal_year']]
+        if sigmaMultiple is not None:
+            x, y, z, epoch, date = self.removeOutliers(x, y, z, epoch, date,
+                                                       sigmaMultiple=sigmaMultiple,
+                                                       **kwargs)
+        #
+        
         # Lat dependendent length scale for projected meters to real meters
         self.meanLat = np.mean(data['lat'].to_numpy())
         self.projLengthScale = self.proj.get_factors(0, self.meanLat
@@ -719,16 +718,16 @@ class nisarStation():
         return date, x, y, z, epoch
 
     @catchError
-    def removeOutliers(self, x, y, z, epoch, sigmaMultiple=3, **kwargs):
+    def removeOutliers(self, x, y, z, epoch, date, sigmaMultiple=3, **kwargs):
         '''
         Remove data where date is not equal to the nominal doy to remove
         overlap
-        x, y : nparray
-            Projected x and y positions.
-        data : Pandas dataframe
-            Dataframe with data returned from database.
+        x, y, z : nparray
+            Projected x, y, z positions.
+        epoch, date : times
+            epoch and ate
         returns:
-            Filtered versions of x, y, and data.
+            Filtered versions of x, y, z, epoch, date.
         '''
         good = np.ones(x.shape, dtype=bool)  # Initially keep all
         # Loop through variables and detect outlier as sigmaMultiple deviation
@@ -740,7 +739,7 @@ class nisarStation():
             sigma = np.std(detrended)
             good = np.logical_and(good,
                                   np.abs(detrended) < sigmaMultiple*sigma)
-        return x[good], y[good], z[good], epoch[good]
+        return x[good], y[good], z[good], epoch[good], date[good]
 
     @catchError
     def _removeOverlap(self, data, **kwargs):
