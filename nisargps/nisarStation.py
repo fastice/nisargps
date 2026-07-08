@@ -150,6 +150,8 @@ class nisarStation():
         '''
         import pandas as pd
         dates = pd.to_datetime(data['time_utc'])
+        if dates.dt.tz is not None:
+            dates = dates.dt.tz_convert(None)
         data = data.copy()
         data['decimal_year'] = dates.apply(
             lambda d: self._datetimeToDecimalYear(d.to_pydatetime()))
