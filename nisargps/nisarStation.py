@@ -50,8 +50,9 @@ class nisarStation():
         return catchErrorInner
 
     @catchError
-    def __init__(self, stationName,  epsg=None, useDB=True, DBConnection=None,
-                 DBConfigFile='calvaldb_config.ini', cacheDB=True, **kwargs):
+    def __init__(self, stationName, epsg=None, useDB=True, DBConnection=None,
+                 DBConfigFile='calvaldb_config.ini', cacheDB=True, debugFile=None,
+                 **kwargs):
         '''
         Class for handling GPS data for a NISAR station
 
@@ -120,6 +121,13 @@ class nisarStation():
  
         # Cache year lengths for speed
         self._computeYearLengthLookUp(**kwargs)
+        # Add decimal_year derived from time_utc (new schema has no decimal_year column)
+        if self.DBData is not None:
+            self.DBData = self._addDecimalYear(self.DBData)
+        # Debug mode: skip DB entirely and load cached data from parquet
+        if debugFile is not None:
+            import pandas as pd
+            self.DBData = self._addDecimalYear(pd.read_parquet(debugFile))
 
     @catchError
     def _computeYearLengthLookUp(self, **kwargs):
@@ -132,6 +140,20 @@ class nisarStation():
              for y in years])
         self.yearLengthLookupSeconds = dict(zip(years, lengths))
         self.yearLengthLookupDays = dict(zip(years, lengths/86400))
+
+    @catchError
+    def _addDecimalYear(self, data, **kwargs):
+        '''
+        Add a decimal_year column computed from time_utc.
+        New schema removed decimal_year; this restores it so downstream
+        code that reads data['decimal_year'] works unchanged.
+        '''
+        import pandas as pd
+        dates = pd.to_datetime(data['time_utc'])
+        data = data.copy()
+        data['decimal_year'] = dates.apply(
+            lambda d: self._datetimeToDecimalYear(d.to_pydatetime()))
+        return data
 
     def printError(self, msg):
         '''
@@ -627,7 +649,7 @@ class nisarStation():
         date1 = self._formatDate(date1, dateFormat=dateFormat, **kwargs)
         date2 = self._formatDate(date2, dateFormat=dateFormat, **kwargs)
         #
-        if self.DB is None:
+        if self.DB is None and self.DBData is None:
             return self._subsetXYZtext(date1, date2, minPoints=minPoints,
                                        quiet=quiet, **kwargs)
         return self._subsetXYZDB(date1, date2, minPoints=minPoints,
@@ -688,18 +710,16 @@ class nisarStation():
         epoch = data['decimal_year'].to_numpy()
         # Make sure all is in place for coordinate conversion
     
-        lat, lon, z = [data[x].to_numpy() for x in ['lat', 'lon', 'ht_abv_eps']]     
+        # height_arp_no_Tides has solid_earth_tide + load_tide_fes + pole_tide removed.
+        # For floating ice shelves, ocean_tide_fes would also need subtracting (future work).
+        # No inverse barometer column is present in the current schema.
+        zCol = 'height_arp_no_tides' if tides else 'height_arp'
+        lat, lon, z = [data[x].to_numpy() for x in ['lat', 'lon', zCol]]
         if self.epsg is None:
-            self._determineEPSG(data['lat'].to_numpy()[0]) 
+            self._determineEPSG(data['lat'].to_numpy()[0])
         #
         if self.lltoxy is None or self.eceftoll is None or self.lltoecef is None:
             self._initCoordinateConversion()
-        #
-        if tides: 
-            dx, dy, dz = [data[x].to_numpy() * 0.01 for x in ['tides_x', 'tides_y', 'tides_z']] 
-            x1, y1, z1 = self.lltoecef(lat, lon, z)
-            lat, lon, z = self.eceftoll(x1 - dx, y1 - dy, z1 - dz)
-            #print(lat[0], lon[0], z[0], dx[0], dy[0], dz[0])
         # Convert to x, y
         x, y = self.lltoxy(lat, lon)
         #
@@ -757,10 +777,8 @@ class nisarStation():
         returns:
             Filtered versions of data.
         '''
-        doy = self._DecimalYearToDOYVector(data['decimal_year'].to_numpy())
-        nominalDoi = data['nominal_doy'].to_numpy()
-        keep = doy == nominalDoi
-        return data[keep]
+        # new schema: continuous data stream, no day-file overlap to remove
+        return data
 
     @catchError
     def _subsetXYZtext(self, date1, date2, minPoints=1, dateFormat='%Y-%m-%d',
